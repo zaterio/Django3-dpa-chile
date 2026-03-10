@@ -23,7 +23,7 @@ class Command(BaseCommand):
             self.stdout.write(
                 self.style.WARNING("Descargando la información de la API...")
             )
-            response = requests.get(f"{BASE_URL}regiones", headers=HEADERS)
+            response = requests.get(f"{BASE_URL}regiones", headers=HEADERS, verify=False)
             response.raise_for_status()
             data = response.json()
         except requests.exceptions.RequestException as e:
@@ -54,7 +54,7 @@ class Command(BaseCommand):
     def create_provincias(self, region):
         try:
             response = requests.get(
-                f"{BASE_URL}regiones/{region.codigo}/provincias", headers=HEADERS
+                f"{BASE_URL}regiones/{region.codigo}/provincias", headers=HEADERS, verify=False
             )
             response.raise_for_status()
             data = response.json()
@@ -89,6 +89,7 @@ class Command(BaseCommand):
             response = requests.get(
                 f"{BASE_URL}regiones/{provincia.region.codigo}/provincias/{provincia.codigo}/comunas",
                 headers=HEADERS,
+                verify=False
             )
             response.raise_for_status()
             data = response.json()
