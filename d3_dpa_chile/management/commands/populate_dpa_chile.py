@@ -1,7 +1,12 @@
 import requests
-import json
+import ssl
+import socket
+from datetime import datetime
 from django.core.management.base import BaseCommand, CommandError
 from d3_dpa_chile.models import Region, Provincia, Comuna
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 BASE_URL = "https://apis.digital.gob.cl/dpa/"
 HEADERS = {
@@ -12,6 +17,79 @@ HEADERS = {
 class Command(BaseCommand):
     help = "Populate Political-Administrative Division of Chile"
 
+    def check_certificate_validity(self):
+        """
+        Verifica la vigencia del certificado SSL de BASE_URL.
+        Si está vencido, consulta al usuario si desea continuar.
+        """
+        try:
+            hostname = (
+                BASE_URL.replace("https://", "").replace("http://", "").rstrip("/")
+            )
+
+            self.stdout.write(self.style.WARNING("Verificando certificado SSL..."))
+
+            context = ssl.create_default_context()
+            with socket.create_connection((hostname, 443), timeout=10) as sock:
+                with context.wrap_socket(sock, server_hostname=hostname) as ssock:
+                    cert = ssock.getpeercert()
+
+            # Extraer fecha de vencimiento del certificado
+            not_after_str = cert.get("notAfter")
+            not_after = datetime.strptime(not_after_str, "%b %d %H:%M:%S %Y %Z")
+
+            current_date = datetime.now()
+
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"Certificado válido hasta: {not_after.strftime('%d/%m/%Y')}"
+                )
+            )
+
+            if current_date > not_after:
+                self.stdout.write(
+                    self.style.ERROR(
+                        f"⚠️  El certificado SSL está VENCIDO desde {not_after.strftime('%d/%m/%Y')}"
+                    )
+                )
+                response = (
+                    input("¿Deseas continuar con el certificado vencido? (s/n): ")
+                    .lower()
+                    .strip()
+                )
+                if response != "s":
+                    raise CommandError("Ejecución cancelada por el usuario.")
+                self.stdout.write(
+                    self.style.WARNING("Continuando con certificado vencido...")
+                )
+
+            return True
+
+        except socket.timeout:
+            self.stdout.write(
+                self.style.WARNING("Timeout al conectarse al servidor SSL")
+            )
+            return False
+        except ssl.SSLError as e:
+            # Si el certificado es inválido o vencido, ssl lanza una excepción
+            self.stdout.write(self.style.ERROR(f"Error SSL detectado: {e}"))
+            response = (
+                input("¿Deseas continuar sin validar el certificado? (s/n): ")
+                .lower()
+                .strip()
+            )
+            if response != "s":
+                raise CommandError("Ejecución cancelada por el usuario.")
+            self.stdout.write(
+                self.style.WARNING("Continuando sin validación de certificado SSL...")
+            )
+            return True
+        except Exception as e:
+            self.stdout.write(
+                self.style.WARNING(f"No se pudo verificar el certificado: {e}")
+            )
+            return True
+
     def handle(self, *args, **options):
         if Region.objects.all().exists():
             self.stdout.write(
@@ -19,11 +97,16 @@ class Command(BaseCommand):
             )
             return
 
+        # Verificar certificado SSL antes de hacer solicitudes
+        self.check_certificate_validity()
+
         try:
             self.stdout.write(
                 self.style.WARNING("Descargando la información de la API...")
             )
-            response = requests.get(f"{BASE_URL}regiones", headers=HEADERS, verify=False)
+            response = requests.get(
+                f"{BASE_URL}regiones", headers=HEADERS, verify=False
+            )
             response.raise_for_status()
             data = response.json()
         except requests.exceptions.RequestException as e:
@@ -54,7 +137,9 @@ class Command(BaseCommand):
     def create_provincias(self, region):
         try:
             response = requests.get(
-                f"{BASE_URL}regiones/{region.codigo}/provincias", headers=HEADERS, verify=False
+                f"{BASE_URL}regiones/{region.codigo}/provincias",
+                headers=HEADERS,
+                verify=False,
             )
             response.raise_for_status()
             data = response.json()
@@ -89,7 +174,7 @@ class Command(BaseCommand):
             response = requests.get(
                 f"{BASE_URL}regiones/{provincia.region.codigo}/provincias/{provincia.codigo}/comunas",
                 headers=HEADERS,
-                verify=False
+                verify=False,
             )
             response.raise_for_status()
             data = response.json()
