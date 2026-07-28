@@ -1,94 +1,42 @@
+import json
+from pathlib import Path
+
 import requests
-import ssl
-import socket
-from datetime import datetime
 from django.core.management.base import BaseCommand, CommandError
-from d3_dpa_chile.models import Region, Provincia, Comuna
-import urllib3
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+from d3_dpa_chile.models import Comuna, Provincia, Region
 
-BASE_URL = "https://apis.digital.gob.cl/dpa/"
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36"
-}
+DATA_FILE = Path(__file__).resolve().parents[2] / "data" / "dpa_chile.json"
 
 
 class Command(BaseCommand):
     help = "Populate Political-Administrative Division of Chile"
 
-    def check_certificate_validity(self):
-        """
-        Verifica la vigencia del certificado SSL de BASE_URL.
-        Si está vencido, consulta al usuario si desea continuar.
-        """
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--source",
+            metavar="URL",
+            help=(
+                "URL de un JSON con el mismo esquema que el archivo de datos "
+                "empaquetado (fuente oficial: Geoportal IDE Chile / SUBDERE). "
+                "Por defecto se usan los datos incluidos en el paquete."
+            ),
+        )
+
+    def load_data(self, source):
+        if source:
+            self.stdout.write(self.style.WARNING(f"Descargando datos desde {source}..."))
+            try:
+                response = requests.get(source, timeout=60)
+                response.raise_for_status()
+                return response.json()
+            except requests.exceptions.RequestException as e:
+                raise CommandError(f"Failed to retrieve data - Exception: {e}")
         try:
-            hostname = (
-                BASE_URL.replace("https://", "").replace("http://", "").rstrip("/")
-            )
-
-            self.stdout.write(self.style.WARNING("Verificando certificado SSL..."))
-
-            context = ssl.create_default_context()
-            with socket.create_connection((hostname, 443), timeout=10) as sock:
-                with context.wrap_socket(sock, server_hostname=hostname) as ssock:
-                    cert = ssock.getpeercert()
-
-            # Extraer fecha de vencimiento del certificado
-            not_after_str = cert.get("notAfter")
-            not_after = datetime.strptime(not_after_str, "%b %d %H:%M:%S %Y %Z")
-
-            current_date = datetime.now()
-
-            self.stdout.write(
-                self.style.SUCCESS(
-                    f"Certificado válido hasta: {not_after.strftime('%d/%m/%Y')}"
-                )
-            )
-
-            if current_date > not_after:
-                self.stdout.write(
-                    self.style.ERROR(
-                        f"⚠️  El certificado SSL está VENCIDO desde {not_after.strftime('%d/%m/%Y')}"
-                    )
-                )
-                response = (
-                    input("¿Deseas continuar con el certificado vencido? (s/n): ")
-                    .lower()
-                    .strip()
-                )
-                if response != "s":
-                    raise CommandError("Ejecución cancelada por el usuario.")
-                self.stdout.write(
-                    self.style.WARNING("Continuando con certificado vencido...")
-                )
-
-            return True
-
-        except socket.timeout:
-            self.stdout.write(
-                self.style.WARNING("Timeout al conectarse al servidor SSL")
-            )
-            return False
-        except ssl.SSLError as e:
-            # Si el certificado es inválido o vencido, ssl lanza una excepción
-            self.stdout.write(self.style.ERROR(f"Error SSL detectado: {e}"))
-            response = (
-                input("¿Deseas continuar sin validar el certificado? (s/n): ")
-                .lower()
-                .strip()
-            )
-            if response != "s":
-                raise CommandError("Ejecución cancelada por el usuario.")
-            self.stdout.write(
-                self.style.WARNING("Continuando sin validación de certificado SSL...")
-            )
-            return True
-        except Exception as e:
-            self.stdout.write(
-                self.style.WARNING(f"No se pudo verificar el certificado: {e}")
-            )
-            return True
+            with open(DATA_FILE, encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            raise CommandError(f"No se pudo leer {DATA_FILE} - Exception: {e}")
 
     def handle(self, *args, **options):
         if Region.objects.all().exists():
@@ -97,67 +45,45 @@ class Command(BaseCommand):
             )
             return
 
-        # Verificar certificado SSL antes de hacer solicitudes
-        self.check_certificate_validity()
+        data = self.load_data(options["source"])
+        if data.get("fuente"):
+            self.stdout.write(self.style.WARNING(f"Fuente: {data['fuente']}"))
 
-        try:
-            self.stdout.write(
-                self.style.WARNING("Descargando la información de la API...")
-            )
-            response = requests.get(
-                f"{BASE_URL}regiones", headers=HEADERS, verify=False
-            )
-            response.raise_for_status()
-            data = response.json()
-        except requests.exceptions.RequestException as e:
-            raise CommandError(f"Failed to retrieve regions - Exception: {e}")
-
-        for region in data:
+        for region in data["regiones"]:
             try:
                 self.stdout.write(self.style.SUCCESS(f"Region: {region['nombre']}"))
 
                 region_fields = {
-                    "tipo": region["tipo"],
+                    "tipo": "region",
                     "nombre": region["nombre"],
                     "lat": str(region["lat"]),
                     "lng": str(region["lng"]),
-                    "url": region["url"],
+                    "url": "",
                 }
 
                 region_obj, region_created = Region.objects.update_or_create(
                     codigo=region["codigo"], defaults=region_fields
                 )
 
-                self.create_provincias(region_obj)
+                self.create_provincias(region_obj, region["provincias"])
             except Exception as e:
                 raise CommandError(f"Fail to populate region - Exception: {e}")
 
         self.stdout.write(self.style.SUCCESS("Successfully populated DPA Chile"))
 
-    def create_provincias(self, region):
-        try:
-            response = requests.get(
-                f"{BASE_URL}regiones/{region.codigo}/provincias",
-                headers=HEADERS,
-                verify=False,
-            )
-            response.raise_for_status()
-            data = response.json()
-        except requests.exceptions.RequestException as e:
-            raise CommandError(f"Failed to retrieve provincia - Exception: {e}")
-
-        for provincia in data:
+    def create_provincias(self, region, provincias):
+        for provincia in provincias:
             try:
                 self.stdout.write(
                     self.style.SUCCESS(f"Provincia: {provincia['nombre']}")
                 )
 
                 provincia_fields = {
-                    "tipo": provincia["tipo"],
+                    "tipo": "provincia",
                     "nombre": provincia["nombre"],
                     "lat": str(provincia["lat"]),
                     "lng": str(provincia["lng"]),
-                    "url": provincia["url"],
+                    "url": "",
                     "region": region,
                 }
 
@@ -165,33 +91,22 @@ class Command(BaseCommand):
                     codigo=provincia["codigo"], defaults=provincia_fields
                 )
 
-                self.create_comunas(provincia_obj)
+                self.create_comunas(region, provincia_obj, provincia["comunas"])
             except Exception as e:
                 raise CommandError(f"Fail to populate provincia - Exception: {e}")
 
-    def create_comunas(self, provincia):
-        try:
-            response = requests.get(
-                f"{BASE_URL}regiones/{provincia.region.codigo}/provincias/{provincia.codigo}/comunas",
-                headers=HEADERS,
-                verify=False,
-            )
-            response.raise_for_status()
-            data = response.json()
-        except requests.exceptions.RequestException as e:
-            raise CommandError(f"Failed to retrieve comunas - Exception: {e}")
-
-        for comuna in data:
+    def create_comunas(self, region, provincia, comunas):
+        for comuna in comunas:
             try:
                 self.stdout.write(self.style.SUCCESS(f"Comuna: {comuna['nombre']}"))
 
                 comuna_fields = {
-                    "tipo": comuna["tipo"],
+                    "tipo": "comuna",
                     "nombre": comuna["nombre"],
                     "lat": str(comuna["lat"]),
                     "lng": str(comuna["lng"]),
-                    "url": comuna["url"],
-                    "region": provincia.region,
+                    "url": "",
+                    "region": region,
                     "provincia": provincia,
                 }
 

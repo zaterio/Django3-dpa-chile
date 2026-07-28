@@ -1,3 +1,5 @@
 include README.md
 # Include the license file
 include LICENSE.txt
+# Include bundled DPA data (official source: Geoportal IDE Chile / SUBDERE)
+recursive-include d3_dpa_chile/data *.json

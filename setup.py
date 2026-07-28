@@ -13,7 +13,7 @@ with open(path.join(here, "README.md"), encoding="utf-8") as f:
 
 setup(
     name="django3-dpa-chile",
-    version="0.4.0",
+    version="0.5.0",
     description="Political-Administrative Division of Chile",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -45,6 +45,9 @@ setup(
         "d3_dpa_chile.management.commands",
     ],
     include_package_data=True,
+    package_data={
+        "d3_dpa_chile": ["data/*.json"],
+    },
     install_requires=[
         "Django>=3.2",
         "requests",
